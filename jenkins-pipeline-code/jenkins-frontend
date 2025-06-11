@@ -1,0 +1,109 @@
+pipeline {
+    agent any 
+    tools {
+        nodejs 'NODEJS'
+    }
+    environment  {
+        AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
+        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        SCANNER_HOME=tool 'SONAR'
+        AWS_ACCOUNT_ID = credentials('ACCOUNT_ID')
+        AWS_ECR_REPO_NAME = credentials('ECR_REPO1')
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/"
+    }
+    stages {
+        stage('Cleaning Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/anildash1234/fpjt.git'
+            }
+        }
+        stage('Sonarqube Analysis') {
+            steps {
+                dir('Application-Code/frontend') {
+                    withSonarQubeEnv('SONARQUBE') {
+                         sh ''' $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=three-tier-project \
+                        -Dsonar.projectKey=three-tier-project '''
+                    }
+                    }
+                }
+            }
+        stage('Quality Check') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'SONAR_TOKEN' 
+                }
+            }
+        }
+        stage('OWASP Dependency-Check Scan') {
+            steps {
+                dir('Application-Code/frontend') {
+                    dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DEPENDENCY'
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
+            }
+        }
+        stage('Trivy File Scan') {
+            steps {
+                dir('Application-Code/frontend') {
+                    sh 'trivy fs . > trivyimage.txt'
+                }
+            }
+        }
+        stage("Docker Image Build") {
+            steps {
+                script {
+                    dir('Application-Code/frontend') {
+                            sh 'docker system prune -f'
+                            sh 'docker container prune -f'
+                            sh 'docker build -t ${AWS_ECR_REPO_NAME} .'
+                    }
+                }
+            }
+        }
+        stage("ECR Image Pushing") {
+            steps {
+                script {
+                        sh ' aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 043309339412.dkr.ecr.ap-south-1.amazonaws.com'
+                        sh 'docker tag front:latest 043309339412.dkr.ecr.ap-south-1.amazonaws.com/front:latest'
+                        sh 'docker push 043309339412.dkr.ecr.ap-south-1.amazonaws.com/front:latest'
+                }
+            }
+        }
+        
+        
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/anildash1234/fpjt.git'
+            }
+        }
+        stage('Update Deployment file') {
+            environment {
+                GIT_REPO_NAME = "fpjt"
+                GIT_USER_NAME = "anildash1234"
+                GIT_TOKEN = credentials('git_token')
+                
+            }
+            steps {
+                dir('Kubernetes-Manifests-file/Frontend') {
+                        sh '''
+                            BUILD_NUMBER=${BUILD_NUMBER}
+                            echo $BUILD_NUMBER
+                            sed -i "s#image:.*#image: $REPOSITORY_URI$AWS_ECR_REPO_NAME:$BUILD_NUMBER#g" deployment.yaml
+                            git add .
+                            git commit -m "updated image"
+                            git push https://${GIT_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:main
+                        '''
+                    }
+                }
+            }
+        }
+    }
+     
+         
